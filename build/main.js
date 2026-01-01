@@ -1,39 +1,6 @@
 
 (function(l, r) { if (!l || l.getElementById('livereloadscript')) return; r = l.createElement('script'); r.async = 1; r.src = '//' + (self.location.host || 'localhost').split(':')[0] + ':35729/livereload.js?snipver=1'; r.id = 'livereloadscript'; r.crossOrigin='anonymous'; l.getElementsByTagName('head')[0].appendChild(r) })(self.document);
-/**
- * @param {Parameters<import('box2d-wasm')>} args
- * @return {ReturnType<import('box2d-wasm')>}
- */
-var initBox2D = async (...args) => {
-  /**
-   * This validation expression comes from wasm-feature-detect:
-   * https://github.com/GoogleChromeLabs/wasm-feature-detect
-   * 
-   * Copyright 2019 Google Inc. All Rights Reserved.
-   * Licensed under the Apache License, Version 2.0 (the "License");
-   * you may not use this file except in compliance with the License.
-   * You may obtain a copy of the License at
-   *     http://www.apache.org/licenses/LICENSE-2.0
-   * Unless required by applicable law or agreed to in writing, software
-   * distributed under the License is distributed on an "AS IS" BASIS,
-   * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-   * See the License for the specific language governing permissions and
-   * limitations under the License.
-   */
-  const hasSIMD = WebAssembly.validate(new Uint8Array([0,97,115,109,1,0,0,0,1,5,1,96,0,1,123,3,2,1,0,10,10,1,8,0,65,0,253,15,253,98,11]));
-  /** @type {{ 'default': import('box2d-wasm') }} */
-  const Box2DModule = await (
-    hasSIMD
-      ? import('./box2d/Box2D.simd.js')
-      : import('./box2d/Box2D.js')
-  );
-  const { 'default': Box2DFactory } = Box2DModule;
-  // awaiting gives us a better stack trace (at the cost of an extra microtask)
-  return await Box2DFactory(...args);
-};
-
-const Box2D = await initBox2D();
-await document.fonts.load('16px "VT323"');
+"use strict";
 // ---- Seeded RNG (LCG) ----
 // 32-bit LCG: x = (a*x + c) mod 2^32
 // Returns float in [0, 1)
@@ -48,7 +15,6 @@ function makeLCG(seed) {
 const rand = makeLCG(123456789); // <= change seed here if you want
 // Optional helpers
 const randRange = (min, max) => min + (max - min) * rand();
-const world = new Box2D.b2World(new Box2D.b2Vec2(0, 0));
 const canvas = document.createElement("canvas");
 const WIDTH = 1080;
 const HEIGHT = 1920;
@@ -59,64 +25,96 @@ canvas.style.width = WIDTH / devicePixelRatio + "px";
 canvas.style.height = HEIGHT / devicePixelRatio + "px";
 const ctx = canvas.getContext("2d");
 document.body.appendChild(canvas);
-function createCircleBody(x, y, size) {
-    const bodyDef = new Box2D.b2BodyDef();
-    bodyDef.set_type(Box2D.b2_dynamicBody);
-    bodyDef.set_position(new Box2D.b2Vec2(x, y));
-    const body = world.CreateBody(bodyDef);
-    const shape = new Box2D.b2CircleShape();
-    shape.set_m_radius(size / 2);
-    const fixtureDef = new Box2D.b2FixtureDef();
-    fixtureDef.set_shape(shape);
-    fixtureDef.set_density(1.0);
-    fixtureDef.set_friction(1);
-    fixtureDef.set_restitution(0);
-    body.CreateFixture(fixtureDef);
-    return body;
-}
 const TEAM_A = 1;
 const TEAM_B = 2;
 const players = [];
 let NextPlayerID = 1;
 class Player {
     team;
+    x;
+    y;
     size;
     id = NextPlayerID++;
     HP = 1000;
-    body;
     constructor(team, x, y, size = 1) {
         this.team = team;
+        this.x = x;
+        this.y = y;
         this.size = size;
         players.push(this);
-        this.body = createCircleBody(x, y, size);
-        this.body.GetUserData().set_pointer(this.id);
     }
+    vx = 0;
+    vy = 0;
     target;
     retargetTimer = 0;
 }
-for (let x = 0; x < 10; x++) {
-    for (let y = 0; y < 10; y++) {
+for (let x = 0; x < 2; x++) {
+    for (let y = 0; y < 2; y++) {
         new Player(TEAM_A, 10 + x + randRange(-0.1, 0.1), 10 + y + randRange(-0.1, 0.1));
         new Player(TEAM_B, 10 + x + randRange(-0.1, 0.1), 10 + y + randRange(-0.1, 0.1) + 30);
     }
 }
-const DT = 1 / 60;
+const DT = 1 / 20;
 let lastTimestamp;
 let timeElapsed = 0;
 let cameraX = 0;
 let cameraY = 0;
 let cameraScale = 25; // 1 meter = 100 pixels
+const COLLISION_STIFFNESS = 5; // how hard circles push apart
+const COLLISION_DAMPING = 1; // velocity damping on collision
+const GLOBAL_DAMPING = 0.98; // air resistance
+function stepPhysics(dt) {
+    // --- Integrate velocity ---
+    for (const p of players) {
+        if (p.HP <= 0)
+            continue;
+        p.x += p.vx * dt;
+        p.y += p.vy * dt;
+        // global damping
+        p.vx *= GLOBAL_DAMPING;
+        p.vy *= GLOBAL_DAMPING;
+    }
+    // --- Circle-circle collisions ---
+    for (let i = 0; i < players.length; i++) {
+        const a = players[i];
+        for (let j = i + 1; j < players.length; j++) {
+            const b = players[j];
+            const dx = b.x - a.x;
+            const dy = b.y - a.y;
+            const dist2 = dx * dx + dy * dy;
+            const ra = a.size * 0.5;
+            const rb = b.size * 0.5;
+            const minDist = ra + rb;
+            if (dist2 === 0 || dist2 >= minDist * minDist)
+                continue;
+            const dist = Math.sqrt(dist2);
+            const nx = dx / dist;
+            const ny = dy / dist;
+            const penetration = minDist - dist;
+            // --- Relative velocity ---
+            const rvx = b.vx - a.vx;
+            const rvy = b.vy - a.vy;
+            const relVel = rvx * nx + rvy * ny;
+            // --- Spring impulse ---
+            const force = COLLISION_STIFFNESS * penetration - COLLISION_DAMPING * relVel;
+            const impulseX = force * nx * dt;
+            const impulseY = force * ny * dt;
+            a.vx -= impulseX;
+            a.vy -= impulseY;
+            b.vx += impulseX;
+            b.vy += impulseY;
+        }
+    }
+}
 // ai stuff
 function findNearestEnemy(player) {
     let best;
     let bestDist = Infinity;
-    const pos = player.body.GetPosition();
     for (const other of players) {
         if (other.team === player.team || other.HP <= 0)
             continue;
-        const p = other.body.GetPosition();
-        const dx = p.get_x() - pos.get_x();
-        const dy = p.get_y() - pos.get_y();
+        const dx = other.x - player.x;
+        const dy = other.y - player.y;
         const d2 = dx * dx + dy * dy;
         if (d2 < bestDist) {
             bestDist = d2;
@@ -128,31 +126,28 @@ function findNearestEnemy(player) {
 const MAX_SPEED = 0.1;
 const KP = 10; // attraction strength
 const KD = 4; // damping (important!)
-const ARRIVAL_RADIUS = 0.5;
-let force = new Box2D.b2Vec2(0, 0);
+const ARRIVAL_RADIUS = 1.2;
+function applyImpulseToCenter(player, fx, fy, dt) {
+    player.vx += fx * DT;
+    player.vy += fy * DT;
+}
 function applyMovementAI(player, dt) {
     if (!player.target)
         return;
-    const body = player.body;
-    const pos = body.GetPosition();
-    const vel = body.GetLinearVelocity();
-    const tpos = player.target.body.GetPosition();
-    const dx = tpos.get_x() - pos.get_x();
-    const dy = tpos.get_y() - pos.get_y();
-    const dist = Math.hypot(dx, dy);
-    if (dist < 0.001)
+    const dx = player.target.x - player.x;
+    const dy = player.target.y - player.y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist < 1.1)
         return;
     const nx = dx / dist;
     const ny = dy / dist;
     // arrival slowing
-    const speedFactor = dist < ARRIVAL_RADIUS ? dist / ARRIVAL_RADIUS : 1;
+    const speedFactor = dist < ARRIVAL_RADIUS ? ARRIVAL_RADIUS - dist : 1;
     const desiredVx = nx * MAX_SPEED * speedFactor;
     const desiredVy = ny * MAX_SPEED * speedFactor;
-    const errVx = desiredVx - vel.get_x();
-    const errVy = desiredVy - vel.get_y();
-    force.set_x(KP * errVx - KD * vel.get_x());
-    force.set_y(KP * errVy - KD * vel.get_y());
-    body.ApplyForceToCenter(force, true);
+    const errVx = desiredVx - player.vx;
+    const errVy = desiredVy - player.vy;
+    applyImpulseToCenter(player, KP * errVx - KD * player.vx, KP * errVy - KD * player.vy, dt);
 }
 function stepAI(dt) {
     for (const p of players) {
@@ -161,12 +156,12 @@ function stepAI(dt) {
             debugger;
             continue;
         }
-        p.retargetTimer -= DT;
+        p.retargetTimer -= dt;
         if (!p.target || p.target.HP <= 0) {
             p.target = findNearestEnemy(p);
             // p.retargetTimer = randRange(0.5, 1)
         }
-        applyMovementAI(p, DT);
+        applyMovementAI(p, dt);
     }
 }
 // damage
@@ -177,7 +172,7 @@ function tick(time) {
     timeElapsed += delta;
     while (timeElapsed >= DT) {
         stepAI(DT);
-        world.Step(DT, 1, 1);
+        stepPhysics(DT);
         timeElapsed -= DT;
     }
     // rendering
@@ -190,23 +185,20 @@ function tick(time) {
     let maxX = -Infinity;
     let maxY = -Infinity;
     for (const player of players) {
-        const pos = player.body.GetPosition();
-        const x = pos.get_x();
-        const y = pos.get_y();
-        minX = Math.min(minX, x - player.size / 2);
-        minY = Math.min(minY, y - player.size / 2);
-        maxX = Math.max(maxX, x + player.size / 2);
-        maxY = Math.max(maxY, y + player.size / 2);
+        minX = Math.min(minX, player.x - player.size / 2);
+        minY = Math.min(minY, player.y - player.size / 2);
+        maxX = Math.max(maxX, player.x + player.size / 2);
+        maxY = Math.max(maxY, player.y + player.size / 2);
         ctx.lineWidth = 0.1;
         ctx.beginPath();
-        ctx.arc(x, y, player.size / 2 - 0.1 / 2, 0, Math.PI * 2);
+        ctx.arc(player.x, player.y, player.size / 2 - 0.1 / 2, 0, Math.PI * 2);
         ctx.strokeStyle = player.team === TEAM_A ? "red" : "blue";
         ctx.stroke();
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
         ctx.fillStyle = "black";
         ctx.font = 'bold 0.8px "VT323"';
-        ctx.fillText(Math.round(player.HP / 100).toString(), x, y);
+        ctx.fillText(Math.round(player.HP / 100).toString(), player.x, player.y);
     }
     // adjust camera
     const boundsWidth = maxX - minX;
