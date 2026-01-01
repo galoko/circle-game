@@ -341,120 +341,12 @@ function clamp(v, min, max) {
 }
 const SPAWN_DURATION = 0.35;
 const SPAWN_FADE_IN = 0.2;
-function fitCameraToPlayers(players, screenW, screenH, margin = 1.2) {
-    // collect alive circles
-    const alive = players.filter(p => p.HP > 0);
-    if (alive.length === 0) {
-        return {
-            rotation: 0,
-            scale: 1,
-            centerX: 0,
-            centerY: 0,
-            rotatedMinX: 0,
-            rotatedMaxX: 0,
-            rotatedMinY: 0,
-            rotatedMaxY: 0,
-        };
-    }
-    // Evaluate a rotation angle theta:
-    // Rotate point (x,y) by theta into rotated-space:
-    // x' =  x*cos + y*sin
-    // y' = -x*sin + y*cos
-    function evalTheta(theta) {
-        const c = Math.cos(theta);
-        const s = Math.sin(theta);
-        let minX = Infinity, maxX = -Infinity;
-        let minY = Infinity, maxY = -Infinity;
-        for (const p of alive) {
-            const r = p.size * 0.5;
-            const xr = p.x * c + p.y * s;
-            const yr = -p.x * s + p.y * c;
-            minX = Math.min(minX, xr - r);
-            maxX = Math.max(maxX, xr + r);
-            minY = Math.min(minY, yr - r);
-            maxY = Math.max(maxY, yr + r);
-        }
-        const w = Math.max(1e-9, maxX - minX);
-        const h = Math.max(1e-9, maxY - minY);
-        const scale = Math.min(screenW / (w * margin), screenH / (h * margin));
-        // center in rotated space
-        const cxr = (minX + maxX) * 0.5;
-        const cyr = (minY + maxY) * 0.5;
-        // convert rotated-center back to world center (inverse rotation)
-        // [x] = [ cos -sin ] [x']
-        // [y]   [ sin  cos ] [y']
-        const centerX = cxr * c - cyr * s;
-        const centerY = cxr * s + cyr * c;
-        return { scale, centerX, centerY, minX, maxX, minY, maxY };
-    }
-    // Because rotating by 90° just swaps axes, the optimum is within [0, π/2)
-    const HALF_PI = Math.PI * 0.5;
-    // --- 1) Coarse grid search ---
-    const SAMPLES = 180; // increase if you want even more precision
-    let bestTheta = 0;
-    let best = evalTheta(0);
-    for (let i = 0; i < SAMPLES; i++) {
-        const theta = (i / SAMPLES) * HALF_PI;
-        const r = evalTheta(theta);
-        if (r.scale > best.scale) {
-            best = r;
-            bestTheta = theta;
-        }
-    }
-    // --- 2) Golden-section refine around bestTheta ---
-    // Search in a small neighborhood. The neighborhood width should cover one grid step or two.
-    const step = HALF_PI / SAMPLES;
-    let lo = bestTheta - 2 * step;
-    let hi = bestTheta + 2 * step;
-    // wrap into [0, HALF_PI)
-    const wrap = (t) => {
-        t %= HALF_PI;
-        if (t < 0)
-            t += HALF_PI;
-        return t;
-    };
-    // If interval crosses boundary, just clamp — simplest + stable
-    lo = Math.max(0, lo);
-    hi = Math.min(HALF_PI, hi);
-    const gr = 0.6180339887498949; // golden ratio conjugate
-    let a = lo;
-    let b = hi;
-    let c = b - gr * (b - a);
-    let d = a + gr * (b - a);
-    let fc = evalTheta(c).scale;
-    let fd = evalTheta(d).scale;
-    // More iterations => more precision
-    for (let iter = 0; iter < 40; iter++) {
-        if (fc < fd) {
-            a = c;
-            c = d;
-            fc = fd;
-            d = a + gr * (b - a);
-            fd = evalTheta(d).scale;
-        }
-        else {
-            b = d;
-            d = c;
-            fd = fc;
-            c = b - gr * (b - a);
-            fc = evalTheta(c).scale;
-        }
-    }
-    const thetaRefined = (a + b) * 0.5;
-    const final = evalTheta(thetaRefined);
-    return {
-        rotation: thetaRefined,
-        scale: final.scale,
-        centerX: final.centerX,
-        centerY: final.centerY,
-        rotatedMinX: final.minX,
-        rotatedMaxX: final.maxX,
-        rotatedMinY: final.minY,
-        rotatedMaxY: final.maxY,
-    };
-}
 // damage
 const TIMESCALE = 1;
+// camera
+function rotate(x, y, cos, sin) {
+    return [x * cos - y * sin, x * sin + y * cos];
+}
 function tick(time) {
     const DT = 1 / 60;
     // physics
@@ -565,22 +457,47 @@ function tick(time) {
         ctx.globalAlpha = 1;
     }
     // ===== adjust camera (CORRECT) =====
-    const boundsWidth = maxX - minX;
-    const boundsHeight = maxY - minY;
     boundsCenterX = (minX + maxX) / 2;
     boundsCenterY = (minY + maxY) / 2;
-    const margin = 1.2;
-    // --- 1. compute optimal rotation (NO SCALE USED) ---
-    const screenAspect = ctx.canvas.width / ctx.canvas.height;
+    const ROTATION_SEARCH_STEPS = 100;
+    const ROTATION_STEP = Math.PI / 2 / ROTATION_SEARCH_STEPS;
+    let bestAngle = 0;
+    let minAspectDelta = Infinity;
+    let bestBoundsWidth = Infinity;
+    let bestBoundsHeight = Infinity;
+    const idealAspect = canvas.width / canvas.height;
+    for (let i = 0; i < ROTATION_SEARCH_STEPS; i++) {
+        let minX = Infinity;
+        let minY = Infinity;
+        let maxX = -Infinity;
+        let maxY = -Infinity;
+        const angle = i * ROTATION_STEP;
+        const cos = Math.cos(angle);
+        const sin = Math.sin(angle);
+        for (const player of players) {
+            if (player.HP <= 0) {
+                continue;
+            }
+            let [px, py] = rotate(player.x - boundsCenterX, player.y - boundsCenterY, cos, sin);
+            minX = Math.min(minX, px - player.size / 2);
+            minY = Math.min(minY, py - player.size / 2);
+            maxX = Math.max(maxX, px + player.size / 2);
+            maxY = Math.max(maxY, py + player.size / 2);
+        }
+        const boundsWidth = maxX - minX;
+        const boundsHeight = maxY - minY;
+        const aspect = boundsWidth / boundsHeight;
+        const delta = Math.abs(idealAspect - aspect);
+        if (delta < minAspectDelta) {
+            bestAngle = angle;
+            minAspectDelta = delta;
+            bestBoundsWidth = boundsWidth;
+            bestBoundsHeight = boundsHeight;
+        }
+    }
     // optimal rectangle-in-rectangle rotation
-    cameraRotation = Math.atan2(boundsWidth - screenAspect * boundsHeight, screenAspect * boundsWidth - boundsHeight);
-    // --- 2. compute rotated AABB size ---
-    const c = Math.abs(Math.cos(cameraRotation));
-    const s = Math.abs(Math.sin(cameraRotation));
-    const rotatedWidth = boundsWidth * c + boundsHeight * s;
-    const rotatedHeight = boundsWidth * s + boundsHeight * c;
-    // --- 3. compute max possible scale AFTER rotation ---
-    cameraScale = Math.min(ctx.canvas.width / (rotatedWidth * margin), ctx.canvas.height / (rotatedHeight * margin));
+    cameraRotation = bestAngle;
+    cameraScale = Math.min(ctx.canvas.width / bestBoundsWidth, ctx.canvas.height / bestBoundsHeight);
     requestAnimationFrame(tick);
 }
 requestAnimationFrame(tick);
