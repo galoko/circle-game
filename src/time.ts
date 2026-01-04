@@ -1,5 +1,7 @@
+import { getQueryParam } from "./utils"
+
 let currentTime = 0
-let timescale = 1
+let timescale = parseInt(getQueryParam("t") ?? "1")
 
 export function getCurrentTime() {
     return currentTime

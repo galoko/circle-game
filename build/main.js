@@ -282,7 +282,7 @@ function drawConfetti() {
 }
 
 let currentTime = 0;
-let timescale = 1;
+let timescale = parseInt(getQueryParam("t") ?? "1");
 function getCurrentTime() {
     return currentTime;
 }
