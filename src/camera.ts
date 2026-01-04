@@ -27,15 +27,18 @@ export function updateEncompassingViewport() {
     maxY = -Infinity
 
     const players = getPlayers()
-    if (players.length < 1) {
-        
-    }
-
     for (const player of players) {
         minX = Math.min(minX, player.x - player.size / 2)
         minY = Math.min(minY, player.y - player.size / 2)
         maxX = Math.max(maxX, player.x + player.size / 2)
         maxY = Math.max(maxY, player.y + player.size / 2)
+    }
+
+    if (!isFinite(minX) || !isFinite(minY) || !isFinite(maxX) || !isFinite(maxY)) {
+        minX = 0
+        minY = 0
+        maxX = 0
+        maxY = 0
     }
 
     // center of current world AABB (computed earlier in your render loop)
