@@ -1,5 +1,5 @@
 let currentTime = 0
-let timescale = 40
+let timescale = 1
 
 export function getCurrentTime() {
     return currentTime
